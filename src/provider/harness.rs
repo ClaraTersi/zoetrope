@@ -159,11 +159,13 @@ fn snapshot(m: &SessionModel) -> Vec<String> {
                 .map(|c| format!("{:?}/{:?}", m.provenance_prompt(c), c.reasoning))
                 .unwrap_or_default();
             format!(
-                "{id}|{:?}|{:?}|{:?}|{:?}|{}|{prov}",
+                "{id}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{prov}",
                 a.kind,
                 a.status,
                 a.parent,
                 a.spawned_by,
+                a.model,
+                a.effort,
                 tools.join(",")
             )
         })

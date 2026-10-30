@@ -183,7 +183,8 @@ pub struct AgentInfo {
     pub spawned_by: Option<String>, // the spawning call id — the spawn/ack join key
     pub status: AgentStatus,             // Running | Idle | Done | Failed | Stopped
     pub(crate) terminal: bool,           // authoritative completion — pins against time-derived revival
-    pub model: Option<String>,
+    pub model: Option<String>,           // latest stated: the maximum over (ts, value), undated below dated
+    pub effort: Option<String>,          // same rule, with its own time; both times are private fields
     pub tool_calls: Vec<ToolCallInfo>,   // {id, name, summary: Option<String>, ts, state: Pending|Ok|Err}
     pub output_tokens: u64,              // summed from usage (deduped per requestId)
     pub first_ts, last_ts: Option<DateTime<Utc>>,
@@ -330,7 +331,7 @@ The crossterm input channel is **unbounded** (input must never block); the **cap
 
 ## inspect subcommand
 
-`zoe inspect <file|id>`: open the session (`provider::open`, any provider, any file of it, or an id), fold every file, and print: session title, **session info** (the provider's labelled rows: mode · permission · queued · file edits · last prompt for Claude; app · version · cwd for Codex), agent/tool totals, then the agent tree (type, description, status, #tools, tokens). Exit non-zero on an unreadable or unrecognised file. **This is the headless smoke test** — CI-runnable end-to-end check of parser + session model + info extraction with no TTY.
+`zoe inspect <file|id>`: open the session (`provider::open`, any provider, any file of it, or an id), fold every file, and print: session title, **session info** (the provider's labelled rows: mode · permission · queued · file edits · last prompt for Claude; app · version · cwd for Codex), agent/tool totals, then the agent tree (type, description, status, model and effort when recorded, #tools, tokens). Exit non-zero on an unreadable or unrecognised file. **This is the headless smoke test** — CI-runnable end-to-end check of parser + session model + info extraction with no TTY.
 
 ## Testing (inline #[cfg(test)], no tests/ dir)
 

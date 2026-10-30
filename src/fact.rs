@@ -71,8 +71,12 @@ pub enum FactKind {
         agent_type: Option<String>,
         description: Option<String>,
     },
-    /// The model the agent was observed running.
+    /// The model the agent was observed running. Can change within a session;
+    /// the core keeps the latest by fact time.
     Model(String),
+    /// The effort the agent was asked to run at, as the format words it. Folds
+    /// like [`FactKind::Model`].
+    Effort(String),
     /// Output tokens. `dedup` is the key under which the format repeats one
     /// turn's usage across several records (Claude's `requestId`); `None` sums
     /// every fact as its own delta.
@@ -158,6 +162,7 @@ impl FactKind {
             FactKind::Activity => "Activity",
             FactKind::Label { .. } => "Label",
             FactKind::Model(_) => "Model",
+            FactKind::Effort(_) => "Effort",
             FactKind::Tokens { .. } => "Tokens",
             FactKind::Prompt(_) => "Prompt",
             FactKind::Reasoning(_) => "Reasoning",

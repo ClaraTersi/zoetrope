@@ -211,7 +211,14 @@ pub struct AgentInfo {
     /// only in-band signal is the spawn ack, which the launch supersedes: those
     /// are time-derived (`Running` while active, `Done` when quiet, reversible).
     pub(crate) terminal: bool,
+    /// The latest model stated, by fact time.
     pub model: Option<String>,
+    /// When `model` was stated.
+    model_at: Option<DateTime<Utc>>,
+    /// The latest effort stated, by fact time.
+    pub effort: Option<String>,
+    /// When `effort` was stated.
+    effort_at: Option<DateTime<Utc>>,
     /// Tool calls in observed order.
     pub(crate) tool_calls: Vector<ToolCallInfo>,
     /// tool_use id → index into `tool_calls`, so the per-entry dedup check and
@@ -251,6 +258,9 @@ impl AgentInfo {
             status: AgentStatus::Running,
             terminal: false,
             model: None,
+            model_at: None,
+            effort: None,
+            effort_at: None,
             tool_calls: Vector::new(),
             tool_index: HashMap::new(),
             output_tokens: 0,
@@ -465,10 +475,13 @@ impl SessionModel {
                 }
             }
             FactKind::Model(model) => {
-                if let Some(a) = self.agents.get_mut(id)
-                    && a.model.is_none()
-                {
-                    a.model = Some(model.clone());
+                if let Some(a) = self.agents.get_mut(id) {
+                    keep_latest(&mut a.model, &mut a.model_at, model, fact.ts);
+                }
+            }
+            FactKind::Effort(effort) => {
+                if let Some(a) = self.agents.get_mut(id) {
+                    keep_latest(&mut a.effort, &mut a.effort_at, effort, fact.ts);
                 }
             }
             FactKind::Tokens { output, dedup } => {
@@ -959,6 +972,22 @@ impl SessionModel {
     }
 }
 
+/// Fold a stated value into a latest-wins slot, which holds the maximum
+/// `(time, value)` seen. `Option` orders `None < Some`, so an undated value never
+/// displaces a dated one. The value breaks a tie, so the winner never depends on
+/// arrival: a maximum is idempotent and commutative (ARCHITECTURE.md §1.1).
+fn keep_latest(
+    slot: &mut Option<String>,
+    at: &mut Option<DateTime<Utc>>,
+    value: &str,
+    ts: Option<DateTime<Utc>>,
+) {
+    if (ts, Some(value)) > (*at, slot.as_deref()) {
+        *slot = Some(value.to_string());
+        *at = ts;
+    }
+}
+
 /// One-line excerpt for provenance display: whitespace collapsed, hard cap so
 /// adversarial 38KB lines can't bloat the model.
 fn excerpt(s: &str) -> String {
@@ -1322,10 +1351,28 @@ mod tests {
         // Per-source streams of facts (internal order preserved by the
         // interleaver), as the provider states them for each file.
         fn streams() -> Vec<Vec<Fact>> {
-            records()
+            let mut streams: Vec<Vec<Fact>> = records()
                 .into_iter()
                 .map(|recs| recs.iter().flat_map(Record::facts).collect())
-                .collect()
+                .collect();
+            // Each on a source of its own: within-source order is preserved, so
+            // only a separate stream can deliver the later value first. The main
+            // stream already stated `claude-opus-4-8` at 13:51:15.151, and that outranks
+            // the later `claude-haiku-4-5` as a value, so only the time can make it win.
+            for fact in [
+                stated(
+                    Some("2026-06-05T13:52:00Z"),
+                    FactKind::Model("claude-haiku-4-5".into()),
+                ),
+                stated(Some("2026-06-05T13:51:00Z"), FactKind::Effort("low".into())),
+                stated(
+                    Some("2026-06-05T13:52:00Z"),
+                    FactKind::Effort("high".into()),
+                ),
+            ] {
+                streams.push(vec![fact]);
+            }
+            streams
         }
 
         fn records() -> Vec<Vec<Record>> {
@@ -1389,6 +1436,98 @@ mod tests {
                 .iter()
                 .any(|s| s.starts_with("wf_1|") && s.contains("Done"))
         );
+        // And the latest model and effort, whichever arrived last.
+        assert!(baseline.iter().any(|s| {
+            s.starts_with("main|") && s.contains(r#"Some("claude-haiku-4-5")|Some("high")"#)
+        }));
+    }
+
+    /// A fact by the main agent, dated `ts` (`None` leaves it undated).
+    fn stated(ts: Option<&str>, kind: FactKind) -> Fact {
+        Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: ts.map(|t| t.parse().unwrap()),
+            kind,
+        }
+    }
+
+    /// The main agent after folding `facts` in the given order.
+    fn main_after(facts: &[&Fact]) -> AgentInfo {
+        let mut m = SessionModel::new("s".into());
+        for fact in facts {
+            m.apply_fact(fact);
+        }
+        m.agent(MAIN_ID).unwrap().clone()
+    }
+
+    const T1: &str = "2026-06-05T10:00:00Z";
+    const T2: &str = "2026-06-05T10:05:00Z";
+
+    #[test]
+    fn latest_model_wins_in_either_order() {
+        // "b" outranks "a" as a value, so only the time can make "a" win.
+        let earlier = stated(Some(T1), FactKind::Model("b".into()));
+        let later = stated(Some(T2), FactKind::Model("a".into()));
+        let model = |facts: &[&Fact]| main_after(facts).model;
+
+        assert_eq!(model(&[&earlier, &later]).as_deref(), Some("a"));
+        assert_eq!(model(&[&later, &earlier]).as_deref(), Some("a"));
+        // A backward seek re-folds the prefix: the value in force back then.
+        assert_eq!(model(&[&earlier]).as_deref(), Some("b"));
+        // Re-applying either fact changes nothing.
+        assert_eq!(
+            model(&[&earlier, &later, &earlier, &later]).as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn undated_model_only_fills_a_gap() {
+        // "z" outranks "a" as a value, so only the date can make "a" win.
+        let dated = stated(Some(T1), FactKind::Model("a".into()));
+        let undated = stated(None, FactKind::Model("z".into()));
+        let model = |facts: &[&Fact]| main_after(facts).model;
+
+        assert_eq!(model(&[&dated, &undated]).as_deref(), Some("a"));
+        assert_eq!(model(&[&undated, &dated]).as_deref(), Some("a"));
+        assert_eq!(model(&[&undated]).as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn effort_folds_like_model() {
+        // "low" outranks "high" as a value, so only the time can make "high" win.
+        let earlier = stated(Some(T1), FactKind::Effort("low".into()));
+        let later = stated(Some(T2), FactKind::Effort("high".into()));
+        let effort = |facts: &[&Fact]| main_after(facts).effort;
+
+        assert_eq!(effort(&[&earlier, &later]).as_deref(), Some("high"));
+        assert_eq!(effort(&[&later, &earlier]).as_deref(), Some("high"));
+        assert_eq!(effort(&[&earlier]).as_deref(), Some("low"));
+        assert_eq!(
+            effort(&[&earlier, &later, &earlier, &later]).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn model_and_effort_keep_separate_times() {
+        // A later model must not make an earlier effort look stale.
+        let model = stated(Some(T2), FactKind::Model("a".into()));
+        let effort = stated(Some(T1), FactKind::Effort("low".into()));
+
+        let main = main_after(&[&model, &effort]);
+        assert_eq!(main.model.as_deref(), Some("a"));
+        assert_eq!(main.effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn undated_or_simultaneous_facts_settle_on_the_greater_value() {
+        for ts in [None, Some(T1)] {
+            let a = stated(ts, FactKind::Model("a".into()));
+            let z = stated(ts, FactKind::Model("z".into()));
+            assert_eq!(main_after(&[&a, &z]).model.as_deref(), Some("z"));
+            assert_eq!(main_after(&[&z, &a]).model.as_deref(), Some("z"));
+        }
     }
 
     #[test]

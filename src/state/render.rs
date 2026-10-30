@@ -89,6 +89,9 @@ fn tree(model: &SessionModel, parent: Option<&str>, depth: usize, out: &mut Stri
         if let Some(model_name) = &agent.model {
             out.push_str(&format!("{indent}    model: {model_name}\n"));
         }
+        if let Some(effort) = &agent.effort {
+            out.push_str(&format!("{indent}    effort: {effort}\n"));
+        }
         out.push_str(&format!(
             "{indent}    tools: {} ({ok}✓ {err}✗ {pending}⏳)   tokens: {}\n",
             agent.tool_calls().len(),
@@ -107,5 +110,46 @@ fn tree(model: &SessionModel, parent: Option<&str>, depth: usize, out: &mut Stri
         // Recurse into this agent's children (groups have subagent children,
         // main has direct subagents + groups).
         tree(model, Some(id), depth + 1, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fact::{Fact, FactKind};
+    use crate::state::session::MAIN_ID;
+
+    fn main_agent_stating(kinds: Vec<FactKind>) -> String {
+        let mut model = SessionModel::new("s".into());
+        for kind in kinds {
+            model.apply_fact(&Fact {
+                agent: Some(MAIN_ID.to_string()),
+                ts: None,
+                kind,
+            });
+        }
+        agents(&model)
+    }
+
+    #[test]
+    fn effort_prints_under_the_model() {
+        let text = main_agent_stating(vec![
+            FactKind::Effort("high".into()),
+            FactKind::Model("gpt-5.6-terra".into()),
+        ]);
+        assert!(
+            text.contains("      model: gpt-5.6-terra\n      effort: high\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn each_line_prints_only_when_recorded() {
+        let model_only = main_agent_stating(vec![FactKind::Model("m".into())]);
+        assert!(!model_only.contains("effort:"), "{model_only}");
+
+        let effort_only = main_agent_stating(vec![FactKind::Effort("low".into())]);
+        assert!(effort_only.contains("      effort: low\n"), "{effort_only}");
+        assert!(!effort_only.contains("model:"), "{effort_only}");
     }
 }
