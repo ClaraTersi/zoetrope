@@ -69,6 +69,8 @@ fn content_matches(info: &AgentInfo, node: &AgentNode) -> bool {
             .unwrap_or(info.kind.default_label());
     title_ok
         && node.description.as_deref() == info.description.as_deref()
+        && node.model.as_deref() == info.model.as_deref()
+        && node.effort.as_deref() == info.effort.as_deref()
         && node.status == info.status
         && node.tool_count == info.tool_calls.len()
         && node.last_tool.as_deref() == info.last_tool()
@@ -81,6 +83,8 @@ fn build_content(info: &AgentInfo) -> AgentNode {
     AgentNode {
         title: node_title(info),
         description: info.description.clone(),
+        model: info.model.clone(),
+        effort: info.effort.clone(),
         status: info.status,
         tool_count: info.tool_calls.len(),
         last_tool: info.last_tool().map(str::to_string),
@@ -329,6 +333,24 @@ mod tests {
     }
 
     #[test]
+    fn sync_refreshes_the_card_when_only_the_model_or_effort_changes() {
+        let mut model = model_with_subagent();
+        let mut flow = new_flow();
+        sync(&mut flow, &model, true);
+
+        model.agents.get_mut("abc123").unwrap().effort = Some("high".into());
+        sync(&mut flow, &model, true);
+        let card = flow.node_content_mut("abc123").unwrap();
+        assert_eq!(card.effort.as_deref(), Some("high"));
+        assert_eq!(card.model, None);
+
+        model.agents.get_mut("abc123").unwrap().model = Some("gpt-5.6-terra".into());
+        sync(&mut flow, &model, true);
+        let card = flow.node_content_mut("abc123").unwrap();
+        assert_eq!(card.model.as_deref(), Some("gpt-5.6-terra"));
+    }
+
+    #[test]
     fn edge_animation_follows_status() {
         let mut model = model_with_subagent();
         let mut flow = new_flow();
@@ -415,22 +437,30 @@ mod tests {
         use ratatui::layout::Rect;
         use ratatui::widgets::Widget;
 
-        let model = model_with_subagent();
+        fn frame(flow: &mut AgentFlow) -> String {
+            let area = Rect::new(0, 0, 100, 30);
+            let mut buf = Buffer::empty(area);
+            flow.render(area, &mut buf);
+
+            let mut text = String::new();
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    text.push_str(buf[(x, y)].symbol());
+                }
+                text.push('\n');
+            }
+            text
+        }
+
+        let mut model = model_with_subagent();
+        let sub = model.agents.get_mut("abc123").unwrap();
+        sub.model = Some("claude-sonnet-5-5".into());
+        sub.effort = Some("high".into());
         let mut flow = new_flow();
         sync(&mut flow, &model, true);
         flow.request_fit_view();
 
-        let area = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(area);
-        (&mut flow).render(area, &mut buf);
-
-        let mut text = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                text.push_str(buf[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
+        let text = frame(&mut flow);
         assert!(
             text.contains("claude"),
             "main card title missing from render:\n{text}"
@@ -438,6 +468,23 @@ mod tests {
         assert!(
             text.contains("guide"),
             "subagent card title missing from render:\n{text}"
+        );
+        assert!(
+            text.contains("sonnet-5-5 · high"),
+            "subagent model row missing from render:\n{text}"
+        );
+
+        // Fit view zooms in on a graph this small, and the whole id has room there.
+        // At its world size the card does not, so the id has to give way.
+        flow.reset_zoom();
+        let text = frame(&mut flow);
+        assert!(
+            text.contains("sonnet-5-5 · high"),
+            "subagent model row missing at world size:\n{text}"
+        );
+        assert!(
+            !text.contains("claude-sonnet"),
+            "subagent model id not shortened to fit the card:\n{text}"
         );
     }
 }

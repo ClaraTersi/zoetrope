@@ -1,8 +1,8 @@
 //! [`AgentNode`]: the `NodeContent` for an agent card.
 //!
 //! Renders a bordered card showing the agent type, a status glyph + color,
-//! a truncated description, a tool count, the last tool name, and an output
-//! token count. Visual state (status, tool tallies) is mirrored from the
+//! the model and effort, a truncated description, a tool count, the last tool
+//! name, and an output token count. Visual state (status, tool tallies) is mirrored from the
 //! domain model into the node via `flow.node_content_mut` on each sync, so the
 //! card needs no back-reference to the `SessionModel`.
 
@@ -12,13 +12,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
 
 use crate::state::session::AgentStatus;
 
 /// Fixed card dimensions for main / workflow nodes (world units).
 pub const MAIN_NODE_DIMS: (f64, f64) = (30.0, 7.0);
 /// Fixed card dimensions for subagent nodes (world units).
-pub const SUB_NODE_DIMS: (f64, f64) = (26.0, 6.0);
+pub const SUB_NODE_DIMS: (f64, f64) = (26.0, 7.0);
 
 /// Below this on-screen size a card has no room for any text — it renders at
 /// cell level instead (solid status-colored fill). Semantic zoom: zoomed out,
@@ -26,6 +27,10 @@ pub const SUB_NODE_DIMS: (f64, f64) = (26.0, 6.0);
 pub const CELL_MIN_WIDTH: u16 = 10;
 /// See [`CELL_MIN_WIDTH`].
 pub const CELL_MIN_HEIGHT: u16 = 3;
+
+/// A card with fewer rows than this inside its border keeps them for what tells
+/// agents apart at a glance, so the zoomed-out overview has no model row.
+const MODEL_ROW_MIN_INNER_HEIGHT: u16 = 3;
 
 /// Custom node content rendered as an agent card.
 ///
@@ -38,6 +43,10 @@ pub struct AgentNode {
     pub title: String,
     /// Truncated description shown under the title.
     pub description: Option<String>,
+    /// The model the agent was last observed running, as the transcript names it.
+    pub model: Option<String>,
+    /// The effort the agent was last asked to run at, as the transcript words it.
+    pub effort: Option<String>,
     pub status: AgentStatus,
     /// Number of tool calls (for the `⚒ N tools` line).
     pub tool_count: usize,
@@ -59,6 +68,57 @@ fn fmt_tokens(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// Fit a model id into `budget` columns: drop whole leading dash-separated
+/// segments until it fits, then truncate what is left. An id's tail tells models
+/// apart better than its head does, and this needs no knowledge of anyone's names.
+/// Dropping stops before the remainder would hold no letters: a bare version
+/// number says nothing about which model it belongs to.
+///
+/// One pass over the id, however many segments it has: the id comes from the
+/// transcript and this runs on every frame. A dash ends any sequence a string's
+/// width depends on, so widths add up across it and what is left never needs
+/// measuring again.
+fn fit_model(id: &str, budget: usize) -> String {
+    let droppable = id
+        .rfind(char::is_alphabetic)
+        .map_or("", |last_letter| &id[..last_letter]);
+    let mut width = id.width();
+    let mut start = 0;
+    for (dash, _) in droppable.match_indices('-') {
+        if width <= budget {
+            break;
+        }
+        width -= id[start..=dash].width();
+        start = dash + 1;
+    }
+    truncate(&id[start..], budget)
+}
+
+/// The row under the title: `<model> · <effort>`, whichever of them was recorded,
+/// or `None` when neither was. Only the model gives way to the width, so the effort
+/// word stays whole for as long as any of the model shows.
+fn model_row(model: Option<&str>, effort: Option<&str>, width: usize) -> Option<String> {
+    let model = model.filter(|m| !m.is_empty());
+    let effort = effort.filter(|e| !e.is_empty());
+    match (model, effort) {
+        (None, None) => None,
+        (Some(model), None) => Some(fit_model(model, width)),
+        (None, Some(effort)) => Some(truncate(effort, width)),
+        (Some(model), Some(effort)) => {
+            let suffix = format!(" · {effort}");
+            let Some(budget) = width.checked_sub(suffix.width()) else {
+                return Some(truncate(&format!("{model}{suffix}"), width));
+            };
+            let fitted = fit_model(model, budget);
+            Some(if fitted.is_empty() {
+                effort.to_string()
+            } else {
+                format!("{fitted}{suffix}")
+            })
+        }
     }
 }
 
@@ -140,6 +200,12 @@ impl NodeContent for AgentNode {
         // Build the candidate lines in priority order.
         let mut lines: Vec<Line> = Vec::new();
         lines.push(title_line);
+
+        if inner.height >= MODEL_ROW_MIN_INNER_HEIGHT
+            && let Some(row) = model_row(self.model.as_deref(), self.effort.as_deref(), inner_w)
+        {
+            lines.push(Line::from(Span::styled(row, bg_style.fg(palette.subtle))));
+        }
 
         if let Some(desc) = self.description.as_ref().filter(|d| !d.is_empty()) {
             let desc = truncate(desc, inner_w);
@@ -233,19 +299,24 @@ mod tests {
         assert_eq!(AgentStatus::Failed.glyph(), '✗');
     }
 
-    fn render_into(area: ratatui::layout::Rect) -> Buffer {
-        use rataflow::Theme;
-        use rataflow::types::Position;
-
-        let node = AgentNode {
+    fn sample_node() -> AgentNode {
+        AgentNode {
             title: "claude".into(),
             description: None,
+            model: Some("claude-opus-4-8".into()),
+            effort: Some("high".into()),
             status: AgentStatus::Done,
             tool_count: 3,
             last_tool: Some("Bash".into()),
             output_tokens: 1200,
             interactive: false,
-        };
+        }
+    }
+
+    fn render_node(node: &AgentNode, area: ratatui::layout::Rect) -> Buffer {
+        use rataflow::Theme;
+        use rataflow::types::Position;
+
         let ctx = NodeRenderContext {
             id: "main",
             area,
@@ -258,6 +329,256 @@ mod tests {
         let mut buf = Buffer::empty(area);
         node.render(&ctx, &mut buf);
         buf
+    }
+
+    fn render_into(area: ratatui::layout::Rect) -> Buffer {
+        render_node(&sample_node(), area)
+    }
+
+    /// One row of a card rendered at the origin, inside its border and padding.
+    fn inner_row(buf: &Buffer, y: u16) -> String {
+        let area = buf.area;
+        (area.left() + 2..area.right() - 2)
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// A subagent-sized card with `model` and `effort`, read at its second row.
+    fn row_of(model: Option<&str>, effort: Option<&str>) -> String {
+        let node = AgentNode {
+            description: Some("research".into()),
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+            ..sample_node()
+        };
+        let buf = render_node(&node, ratatui::layout::Rect::new(0, 0, 26, 7));
+        inner_row(&buf, 2).trim_end().to_string()
+    }
+
+    #[test]
+    fn fit_model_drops_leading_segments_then_truncates() {
+        assert_eq!(fit_model("claude-sonnet-5-5", 15), "sonnet-5-5");
+        assert_eq!(fit_model("gpt-5.6-terra", 22), "gpt-5.6-terra");
+        assert_eq!(fit_model("abcdefghij", 5), "abcd…");
+        // A trailing dash has no segment behind it to keep.
+        assert_eq!(fit_model("abcdef-", 3), "ab…");
+    }
+
+    /// The rule stated one drop at a time, measuring what is left after each.
+    fn fit_by_measuring_each_drop(id: &str, budget: usize) -> String {
+        let mut fitted = id;
+        while fitted.width() > budget {
+            match fitted.split_once('-') {
+                Some((_, tail)) if tail.chars().any(char::is_alphabetic) => fitted = tail,
+                _ => break,
+            }
+        }
+        truncate(fitted, budget)
+    }
+
+    #[test]
+    fn fit_model_matches_measuring_after_each_drop() {
+        // Besides plain ids: wide characters, and the sequences a string's width
+        // depends on (emoji and text presentation, CRLF, ligatures, conjuncts, ZWJ),
+        // placed against a dash so that a width which did not add up across it shows.
+        for id in [
+            "claude-sonnet-5-5",
+            "gpt-5.6-terra",
+            "abcdef-",
+            "-",
+            "--a--",
+            "4-8-12",
+            "a-1-b-2-",
+            "模型-中文-4-五",
+            "\u{1F600}-x-\u{FE0F}-y",
+            "1\u{FE0F}-#-\u{FE0F}z-\u{2764}\u{FE0E}",
+            "a\r-\nb-c",
+            "\u{644}-\u{627}-\u{644}\u{627}-q",
+            "\u{1780}\u{17D2}-\u{1780}-q",
+            "a\u{0301}-\u{200D}b-\u{200D}-c",
+            "\u{1F468}\u{200D}-\u{1F469}-d",
+        ] {
+            for budget in 0..=id.width() + 1 {
+                assert_eq!(
+                    fit_model(id, budget),
+                    fit_by_measuring_each_drop(id, budget),
+                    "{id:?} at {budget}"
+                );
+            }
+        }
+    }
+
+    /// An id comes from the transcript and every card fits it on every frame, so
+    /// its cost must not grow with the square of its length. At this size, measuring
+    /// after each drop takes many minutes; the bound only tells that from one pass.
+    #[test]
+    fn fit_model_stays_linear_on_an_id_of_many_segments() {
+        const SEGMENTS: usize = 200_000;
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let fitted = [
+                fit_model(&"a-".repeat(SEGMENTS), 22),
+                // The only letter is last, so every drop has to look for one.
+                fit_model(&format!("{}a", "1-".repeat(SEGMENTS)), 22),
+                // Dropping stops at the last letter, far wider than the budget.
+                fit_model(
+                    &format!("{}{}", "a-".repeat(SEGMENTS), "1-".repeat(SEGMENTS)),
+                    22,
+                ),
+            ];
+            sent.send(fitted).unwrap();
+        });
+        let fitted = received
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("fitting a long id should finish within the bound");
+        assert_eq!(
+            fitted,
+            [
+                "a-a-a-a-a-a-a-a-a-a-a-",
+                "1-1-1-1-1-1-1-1-1-1-a",
+                "a-1-1-1-1-1-1-1-1-1-1…",
+            ]
+        );
+    }
+
+    #[test]
+    fn fit_model_keeps_a_part_with_letters() {
+        assert_eq!(fit_model("claude-opus-4-8", 7), "opus-4…");
+        // Parts without letters can still be dropped on the way to one with them.
+        assert_eq!(fit_model("gpt-5.6-terra", 5), "terra");
+        // An id with no letters at all has nothing to protect: it just truncates.
+        assert_eq!(fit_model("4-8-12", 3), "4-…");
+        assert_eq!(
+            model_row(Some("claude-opus-4-8"), Some("low"), 13).as_deref(),
+            Some("opus-4… · low")
+        );
+    }
+
+    #[test]
+    fn row_keeps_the_effort_word_whole_while_it_fits() {
+        for model in ["claude-sonnet-5-5", "gpt-5.6-terra", "abcdefghij"] {
+            for effort in ["low", "medium", "high"] {
+                for width in effort.width() + 3..=30 {
+                    let row = model_row(Some(model), Some(effort), width).unwrap();
+                    assert!(row.width() <= width, "{row:?} overflows {width}");
+                    assert!(row.ends_with(effort), "{row:?} cut {effort} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_narrower_than_the_effort_part_truncates_whole() {
+        // ` · high` is 7 columns: at 6 it cannot stand, so the row reads from the
+        // start like any other truncated text.
+        let row = model_row(Some("claude-sonnet-5-5"), Some("high"), 6);
+        assert_eq!(row.as_deref(), Some("claud…"));
+        // At exactly 7 the model has no room: the word stands without a separator.
+        let row = model_row(Some("claude-sonnet-5-5"), Some("high"), 7);
+        assert_eq!(row.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn card_row_shows_model_and_effort_whole_when_they_fit() {
+        // 15 + 7 and 13 + 9: both exactly the 22 columns inside a subagent card.
+        assert_eq!(
+            row_of(Some("claude-opus-4-8"), Some("high")),
+            "claude-opus-4-8 · high"
+        );
+        assert_eq!(
+            row_of(Some("gpt-5.6-terra"), Some("medium")),
+            "gpt-5.6-terra · medium"
+        );
+    }
+
+    #[test]
+    fn card_row_shortens_the_model_and_not_the_effort() {
+        assert_eq!(
+            row_of(Some("claude-sonnet-5-5"), Some("high")),
+            "sonnet-5-5 · high"
+        );
+    }
+
+    #[test]
+    fn card_row_shows_only_what_was_recorded() {
+        assert_eq!(row_of(Some("claude-opus-4-8"), None), "claude-opus-4-8");
+        assert_eq!(row_of(None, Some("high")), "high");
+        // Neither: the description moves up, with no empty row or separator.
+        assert_eq!(row_of(None, None), "research");
+        assert_eq!(row_of(Some(""), Some("")), "research");
+    }
+
+    #[test]
+    fn every_row_fits_at_world_size() {
+        for (w, h) in [MAIN_NODE_DIMS, SUB_NODE_DIMS] {
+            let node = AgentNode {
+                description: Some("research".into()),
+                ..sample_node()
+            };
+            let buf = render_node(&node, ratatui::layout::Rect::new(0, 0, w as u16, h as u16));
+            assert!(inner_row(&buf, 1).contains("claude"), "title at {w}x{h}");
+            assert!(inner_row(&buf, 2).contains("· high"), "model at {w}x{h}");
+            assert!(inner_row(&buf, 3).contains("research"), "desc at {w}x{h}");
+            assert!(inner_row(&buf, 4).contains("⚒ 3"), "tools at {w}x{h}");
+            assert!(inner_row(&buf, 5).contains("done"), "footer at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn short_card_drops_the_footer_before_the_model_row() {
+        let node = AgentNode {
+            description: Some("research".into()),
+            ..sample_node()
+        };
+        let buf = render_node(&node, ratatui::layout::Rect::new(0, 0, 26, 6));
+        assert_eq!(inner_row(&buf, 2).trim_end(), "claude-opus-4-8 · high");
+        assert!(inner_row(&buf, 4).contains("⚒ 3"));
+        assert!(!(1..5).any(|y| inner_row(&buf, y).contains("done")));
+    }
+
+    #[test]
+    fn two_row_card_draws_no_model_row() {
+        let area = ratatui::layout::Rect::new(0, 0, 26, 4);
+        for (description, second_row) in [(Some("research"), "research"), (None, "⚒ 3 · Bash")] {
+            let bare = AgentNode {
+                description: description.map(str::to_string),
+                model: None,
+                effort: None,
+                ..sample_node()
+            };
+            let recorded = AgentNode {
+                model: Some("claude-opus-4-8".into()),
+                effort: Some("high".into()),
+                ..bare.clone()
+            };
+            let buf = render_node(&recorded, area);
+            assert!(inner_row(&buf, 1).contains("claude"));
+            assert_eq!(inner_row(&buf, 2).trim_end(), second_row);
+            assert_eq!(buf, render_node(&bare, area), "differs from a bare card");
+        }
+    }
+
+    #[test]
+    fn three_row_card_draws_the_model_row_under_the_title() {
+        let area = ratatui::layout::Rect::new(0, 0, 26, 5);
+        for (description, third_row) in [(Some("research"), "research"), (None, "⚒ 3 · Bash")] {
+            let node = AgentNode {
+                description: description.map(str::to_string),
+                ..sample_node()
+            };
+            let buf = render_node(&node, area);
+            assert!(inner_row(&buf, 1).contains("claude"));
+            assert_eq!(inner_row(&buf, 2).trim_end(), "claude-opus-4-8 · high");
+            assert_eq!(inner_row(&buf, 3).trim_end(), third_row);
+        }
+    }
+
+    #[test]
+    fn narrowest_card_stays_inside_its_border() {
+        let area = ratatui::layout::Rect::new(0, 0, CELL_MIN_WIDTH, 7);
+        let buf = render_into(area);
+        assert_eq!(inner_row(&buf, 2), "claud…");
+        assert_eq!(buf[(area.right() - 1, 2)].symbol(), "│");
     }
 
     #[test]
