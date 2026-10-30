@@ -62,6 +62,11 @@ pub enum Entry {
     #[serde(rename = "queue-operation")]
     QueueOperation(FlatValueEntry),
 
+    /// One API request an agent sent. Flat like the metadata above, except that
+    /// it carries its own `timestamp`. States the effort the request asked for.
+    #[serde(rename = "api-request")]
+    ApiRequest(ApiRequestEntry),
+
     // --- Ledger entries (subagent files + journal.jsonl). ---
     /// Ledger `started` entry. Excluded from the graph.
     #[serde(rename = "started")]
@@ -422,6 +427,49 @@ pub struct AiTitleEntry {
 pub struct FlatValueEntry {
     #[serde(flatten)]
     pub fields: serde_json::Value,
+}
+
+/// An `api-request` entry: no `uuid`/`parentUuid` envelope, and only what is
+/// read is declared.
+///
+/// Attribute it by file, not by its fields: `agentId` is present only in
+/// subagent files, as it is on their other lines. `querySource` is not read.
+/// Observed values are `repl_main_thread` and `sdk` in main files, and
+/// `agent:builtin:<type>` and `agent:custom:<name>` in subagent files. No query
+/// outside an agent's own work (a compaction, say) has been seen; if one appears,
+/// it would come under a new value here, and that is where to filter it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiRequestEntry {
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub params: Option<ApiRequestParams>,
+}
+
+impl ApiRequestEntry {
+    /// The effort this request asked for, if it recorded one.
+    pub fn effort(&self) -> Option<&str> {
+        self.params
+            .as_ref()?
+            .output_config
+            .as_ref()?
+            .effort
+            .as_deref()
+    }
+}
+
+/// The `params` object of an `api-request` entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiRequestParams {
+    #[serde(default)]
+    pub output_config: Option<OutputConfig>,
+}
+
+/// `params.output_config` of an `api-request` entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputConfig {
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// A ledger entry (`started` / `result`) from subagent files and
@@ -800,6 +848,31 @@ mod tests {
                 ("queue-operation", Entry::QueueOperation(_)) => {}
                 _ => panic!("{label} mis-dispatched to {entry:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn api_request_reads_its_time_and_effort() {
+        let line = r#"{"type":"api-request","sessionId":"s","timestamp":"2026-06-21T10:00:05.000Z","querySource":"repl_main_thread","params":{"model":"claude-opus-4-8","output_config":{"effort":"high"}}}"#;
+        let Entry::ApiRequest(r) = parse_line(line).expect("parses") else {
+            panic!("expected api-request");
+        };
+        assert_eq!(r.effort(), Some("high"));
+        assert_eq!(r.timestamp, Some("2026-06-21T10:00:05Z".parse().unwrap()));
+    }
+
+    #[test]
+    fn api_request_tolerates_missing_fields() {
+        for line in [
+            r#"{"type":"api-request"}"#,
+            r#"{"type":"api-request","params":null}"#,
+            r#"{"type":"api-request","params":{"model":"m"}}"#,
+            r#"{"type":"api-request","params":{"output_config":{"format":"x"}}}"#,
+        ] {
+            let Some(Entry::ApiRequest(r)) = parse_line(line) else {
+                panic!("expected api-request: {line}");
+            };
+            assert_eq!(r.effort(), None, "{line}");
         }
     }
 

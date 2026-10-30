@@ -176,6 +176,7 @@ fn entry_timestamp(entry: &Entry) -> Option<DateTime<Utc>> {
         Entry::Assistant(e) => e.envelope.timestamp,
         Entry::System(e) => e.envelope.timestamp,
         Entry::Attachment(e) => e.envelope.timestamp,
+        Entry::ApiRequest(e) => e.timestamp,
         _ => None,
     }
 }
@@ -302,6 +303,22 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                 }
             }
             ensure_activity(&mut out, &owner, ts);
+        }
+        // The effort belongs to the agent whose file holds the request. The
+        // `model` beside it is what was asked for, and an `assistant` line states
+        // the model that answered.
+        Entry::ApiRequest(e) => {
+            let Some(owner) = owner_of(source) else {
+                return out;
+            };
+            if let Some(effort) = e.effort() {
+                out.push(Fact {
+                    agent: Some(owner.clone()),
+                    ts: e.timestamp,
+                    kind: FactKind::Effort(effort.to_string()),
+                });
+            }
+            ensure_activity(&mut out, &owner, e.timestamp);
         }
         // A workflow journal `result` is the ledger's completion for the agent it
         // names. Undated in the format; the timeline dates it by that agent.
@@ -506,6 +523,82 @@ mod tests {
             streams
         };
         crate::provider::harness::conform("claude", "demo", streams);
+    }
+
+    const REQUEST_AT: &str = "2026-06-21T10:00:05Z";
+
+    /// The kinds a line states, with the agent each is about and its time.
+    fn stated(source: Source, line: &str) -> (Statement, Vec<(Option<String>, FactKind)>) {
+        let st = Stream::new(source)
+            .push(line)
+            .expect("the line states facts");
+        let by_agent = st
+            .facts
+            .iter()
+            .map(|f| (f.agent.clone(), f.kind.clone()))
+            .collect();
+        (st, by_agent)
+    }
+
+    #[test]
+    fn api_request_states_the_effort_for_the_main_agent() {
+        let line = r#"{"type":"api-request","sessionId":"s","timestamp":"2026-06-21T10:00:05.000Z","querySource":"repl_main_thread","params":{"model":"claude-opus-4-8","output_config":{"effort":"high"}}}"#;
+        let at = Some(REQUEST_AT.parse::<DateTime<Utc>>().unwrap());
+
+        let entry = parse_line(line).expect("the line parses");
+        let direct = facts(&Source::Main, &entry);
+        assert_eq!(direct.len(), 1, "one fact, and no Model: {direct:?}");
+        assert_eq!(direct[0].agent.as_deref(), Some(MAIN_ID));
+        assert_eq!(direct[0].ts, at);
+        assert!(matches!(direct[0].kind, FactKind::Effort(ref e) if e == "high"));
+
+        // Through a stream, the record's own time dates the statement.
+        let mut stream = Stream::new(Source::Main);
+        assert_eq!(stream.push(line).expect("states facts").at, at);
+    }
+
+    #[test]
+    fn api_request_is_attributed_by_file_not_by_its_agent_id() {
+        // The field disagrees with the file on purpose: the file decides.
+        let line = r#"{"type":"api-request","sessionId":"s","agentId":"not-the-file","timestamp":"2026-06-21T10:00:05.000Z","querySource":"agent:builtin:Explore","params":{"model":"claude-opus-4-8","output_config":{"effort":"low"}}}"#;
+        let (_, by_agent) = stated(Source::Sub("a1".into()), line);
+        assert!(
+            matches!(
+                by_agent.as_slice(),
+                [(Some(owner), FactKind::Effort(e))] if owner == "a1" && e == "low"
+            ),
+            "{by_agent:?}"
+        );
+    }
+
+    #[test]
+    fn api_request_without_an_effort_states_only_activity() {
+        for line in [
+            r#"{"type":"api-request","timestamp":"2026-06-21T10:00:05.000Z","params":{"model":"claude-opus-4-8"}}"#,
+            r#"{"type":"api-request","timestamp":"2026-06-21T10:00:05.000Z","params":{"output_config":{}}}"#,
+            r#"{"type":"api-request","timestamp":"2026-06-21T10:00:05.000Z"}"#,
+        ] {
+            let (st, by_agent) = stated(Source::Sub("a1".into()), line);
+            assert!(
+                matches!(
+                    by_agent.as_slice(),
+                    [(Some(owner), FactKind::Activity)] if owner == "a1"
+                ),
+                "{line}: {by_agent:?}"
+            );
+            assert_eq!(st.at, Some(REQUEST_AT.parse().unwrap()), "{line}");
+        }
+    }
+
+    #[test]
+    fn api_request_in_a_ledger_states_nothing() {
+        // A ledger is about agents, not by one, so no agent owns the request.
+        let line = r#"{"type":"api-request","timestamp":"2026-06-21T10:00:05.000Z","params":{"output_config":{"effort":"high"}}}"#;
+        assert!(
+            Stream::new(Source::Ledger("wf".into()))
+                .push(line)
+                .is_none()
+        );
     }
 
     #[test]
