@@ -265,9 +265,13 @@ impl Stream {
                         }
                     }
                     EventMsg::ThreadSettingsApplied { thread_settings } => {
-                        if let Some(model) = thread_settings.as_ref().and_then(|s| s.model.clone())
-                        {
-                            out.push(by(FactKind::Model(model)));
+                        if let Some(settings) = thread_settings {
+                            if let Some(model) = &settings.model {
+                                out.push(by(FactKind::Model(model.clone())));
+                            }
+                            if let Some(effort) = &settings.reasoning_effort {
+                                out.push(by(FactKind::Effort(effort.clone())));
+                            }
                         }
                     }
                     EventMsg::TaskStarted { .. }
@@ -280,6 +284,9 @@ impl Stream {
             Payload::TurnContext(tc) => {
                 if let Some(model) = &tc.model {
                     out.push(by(FactKind::Model(model.clone())));
+                }
+                if let Some(effort) = &tc.effort {
+                    out.push(by(FactKind::Effort(effort.clone())));
                 }
                 ensure_activity(&mut out, owner);
             }
@@ -584,6 +591,42 @@ mod tests {
         let st = s.push(r#"{"timestamp":"2026-08-26T16:13:40.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child said"}]}}"#).unwrap();
         assert_eq!(st.facts[0].agent.as_deref(), Some("c"));
         assert!(matches!(st.facts[0].kind, FactKind::Reasoning(ref t) if t == "child said"));
+    }
+
+    #[test]
+    fn turn_context_states_model_and_effort() {
+        let mut s = Stream::new();
+        s.push(r#"{"timestamp":"2026-08-26T15:30:09.955Z","ordinal":0,"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#);
+        let st = s.push(r#"{"timestamp":"2026-08-26T15:30:10.000Z","ordinal":1,"type":"turn_context","payload":{"turn_id":"t","model":"gpt-5.6-terra","effort":"high","cwd":"/x"}}"#).unwrap();
+        assert!(st.facts.iter().any(|f| f.agent.as_deref() == Some("main")
+            && matches!(&f.kind, FactKind::Model(m) if m == "gpt-5.6-terra")));
+        assert!(st.at.is_some());
+        assert!(st.facts.iter().any(|f| f.agent.as_deref() == Some("main")
+            && f.ts == st.at
+            && matches!(&f.kind, FactKind::Effort(e) if e == "high")));
+
+        let st = s.push(r#"{"timestamp":"2026-08-26T15:30:11.000Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"u","model":"gpt-5.6-terra","cwd":"/x"}}"#).unwrap();
+        assert!(
+            st.facts
+                .iter()
+                .any(|f| matches!(&f.kind, FactKind::Model(_)))
+        );
+        assert!(
+            !st.facts
+                .iter()
+                .any(|f| matches!(&f.kind, FactKind::Effort(_)))
+        );
+    }
+
+    #[test]
+    fn thread_settings_state_the_reasoning_effort() {
+        let mut s = Stream::new();
+        s.push(r#"{"timestamp":"2026-08-26T15:30:09.955Z","ordinal":0,"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#);
+        let st = s.push(r#"{"timestamp":"2026-08-26T15:30:10.000Z","ordinal":1,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-terra","reasoning_effort":"low"}}}"#).unwrap();
+        assert!(st.at.is_some());
+        assert!(st.facts.iter().any(|f| f.agent.as_deref() == Some("main")
+            && f.ts == st.at
+            && matches!(&f.kind, FactKind::Effort(e) if e == "low")));
     }
 
     #[test]

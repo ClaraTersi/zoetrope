@@ -355,6 +355,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ThreadSettings {
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -483,6 +484,7 @@ pub struct SubAgentActivity {
 pub struct TurnContext {
     pub turn_id: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub cwd: Option<String>,
 }
 
