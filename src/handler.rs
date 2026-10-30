@@ -75,26 +75,10 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
         // is selected). `j`/`k` and PageDown/PageUp move the offset; clamped to
         // the list length so long lists (30–190+ calls) are fully reachable.
         // Arrow keys are intentionally left to the flow for graph navigation.
-        KeyCode::Char('j') => {
-            if scroll_detail(app, 1) {
-                return false;
-            }
-        }
-        KeyCode::Char('k') => {
-            if scroll_detail(app, -1) {
-                return false;
-            }
-        }
-        KeyCode::PageDown => {
-            if scroll_detail(app, PAGE_SCROLL) {
-                return false;
-            }
-        }
-        KeyCode::PageUp => {
-            if scroll_detail(app, -PAGE_SCROLL) {
-                return false;
-            }
-        }
+        KeyCode::Char('j') if scroll_detail(app, 1) => return false,
+        KeyCode::Char('k') if scroll_detail(app, -1) => return false,
+        KeyCode::PageDown if scroll_detail(app, PAGE_SCROLL) => return false,
+        KeyCode::PageUp if scroll_detail(app, -PAGE_SCROLL) => return false,
 
         // Camera keys name destinations, not toggles: `o` overview (auto-fit
         // everything), `f` follow (readable zoom, track the latest activity).

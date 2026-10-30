@@ -329,10 +329,10 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
         Entry::LastPrompt(e) => {
             push_session(&mut out, "last prompt", str_field(&e.fields, "lastPrompt"))
         }
-        Entry::QueueOperation(e) => {
-            if str_field(&e.fields, "operation").as_deref() == Some("enqueue") {
-                out.push(meta(FactKind::Tally("queued".into())));
-            }
+        Entry::QueueOperation(e)
+            if str_field(&e.fields, "operation").as_deref() == Some("enqueue") =>
+        {
+            out.push(meta(FactKind::Tally("queued".into())));
         }
         Entry::FileHistorySnapshot(_) => out.push(meta(FactKind::Tally("file edits".into()))),
         // System, attachment, `started` ledgers, unknown: nothing is stated.
