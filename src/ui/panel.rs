@@ -197,9 +197,9 @@ fn render_header(frame: &mut Frame, area: Rect, agent: &AgentInfo, palette: &rat
 
     // Status + model.
     let mut status_spans = vec![Span::styled(status_text, bg.fg(status_color))];
-    if let Some(model) = agent.model.as_ref() {
+    if let Some(label) = model_label(agent) {
         status_spans.push(Span::styled("  ", bg));
-        status_spans.push(Span::styled(model.as_str(), bg.fg(palette.subtle)));
+        status_spans.push(Span::styled(label, bg.fg(palette.subtle)));
     }
     lines.push(Line::from(status_spans));
 
@@ -499,6 +499,17 @@ fn tool_line(
     Line::from(spans)
 }
 
+/// The full model id and effort, `<model> · <effort>`; a missing part is left
+/// out along with its separator. The card shortens the id to fit; the panel
+/// has room and keeps it whole.
+fn model_label(agent: &AgentInfo) -> Option<String> {
+    match (agent.model.as_deref(), agent.effort.as_deref()) {
+        (Some(m), Some(e)) => Some(format!("{m} · {e}")),
+        (Some(p), None) | (None, Some(p)) => Some(p.to_owned()),
+        (None, None) => None,
+    }
+}
+
 /// Format a timing line from an agent's first/last timestamps.
 fn fmt_timing(agent: &AgentInfo) -> Option<String> {
     match (agent.first_ts, agent.last_ts) {
@@ -578,6 +589,42 @@ mod tests {
     }
 
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn model_label_joins_the_parts_that_exist() {
+        let mut a = agent_with_ts(None, None);
+        assert_eq!(model_label(&a), None);
+        a.effort = Some("high".into());
+        assert_eq!(model_label(&a).as_deref(), Some("high"));
+        a.model = Some("claude-sonnet-5-5".into());
+        assert_eq!(model_label(&a).as_deref(), Some("claude-sonnet-5-5 · high"));
+        a.effort = None;
+        assert_eq!(model_label(&a).as_deref(), Some("claude-sonnet-5-5"));
+    }
+
+    #[test]
+    fn header_status_line_shows_the_full_model_and_effort() {
+        use crate::state::session::AgentStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut agent = agent_with_ts(None, None);
+        agent.status = AgentStatus::Done;
+        agent.model = Some("claude-sonnet-5-5".into());
+        agent.effort = Some("high".into());
+
+        let palette = rataflow::Theme::Dark.palette();
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        terminal
+            .draw(|frame| render_header(frame, frame.area(), &agent, &palette))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let status_row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect();
+        assert_eq!(status_row.trim_end(), "done  claude-sonnet-5-5 · high");
+    }
 
     fn agent_with_ts(first: Option<i64>, last: Option<i64>) -> AgentInfo {
         let mut a = AgentInfo::new(crate::state::session::AgentKind::Subagent);

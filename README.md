@@ -145,7 +145,7 @@ session from disk, or drop a transcript on the page. It stays local there too.
 
 **Inspection**
 - Click any agent for its provenance: the prompt that spawned it, the reasoning
-  around it, its model, and every tool call it made with timings
+  around it, its model and effort, and every tool call it made with timings
 - Session info overlay: mode, permissions, queued ops, file edits, last prompt
 - `zoe inspect` prints the whole tree headlessly, so it runs anywhere without a TTY
 
